@@ -1,0 +1,187 @@
+---
+format:
+  html:
+    css: "files/style.css"
+    toc: true
+    toc-location: left
+    number-sections: true
+    self-contained: true
+  docx:
+    toc: false
+    toc-title: Indice
+    section-numbers: true
+    reference-doc: "files/style.docx"
+editor_options: 
+  chunk_output_type: console
+execute:
+  echo: false
+  warning: false
+crossref:
+  fig-title: Figure
+  fig-prefix: Figure
+  tbl-title: Table
+  tbl-prefix: Table
+---
+
+```{r}
+#| label: setup
+
+source("http://inkaverse.com/docs.r")
+```
+
+```{r}
+#| label: format-article-md
+#| echo: false
+
+md_raw <- readLines("render2rticle.md", encoding = "UTF-8", warn = FALSE)
+
+title_idx <- grep("^(#\\s|\\*\\*)", md_raw)[1]
+
+author_idx <- which(nchar(trimws(md_raw)) > 0 & seq_along(md_raw) > title_idx)[1]
+
+md_raw[author_idx] <- gsub(
+  "([[:alpha:]\\.])([0-9]{1,2}(?:,[0-9]{1,2})*\\\\?\\*?)",
+  "\\1^\\2^",
+  md_raw[author_idx],
+  perl = TRUE
+)
+md_raw <- gsub("^([0-9]{1,2})([[:alpha:]])", "^\\1^ \\2", md_raw, perl = TRUE)
+
+pat_caption <- paste0(
+  "^(\\[\\*\\*(?:Table|Figure|Tabla|Figura)\\s+[0-9]+(?:\\\\\\.\\*\\*|\\*\\*\\.)\\]\\([^)]*\\))\\s*",
+  "|",
+  "^(\\[\\*\\*(?:Table|Figure|Tabla|Figura)\\s+[0-9]+\\*\\*\\]\\([^)]*\\))(?:\\*\\*\\.\\*\\*|\\.)\\s*"
+)
+is_caption <- grepl(pat_caption, md_raw, perl = TRUE)
+md_raw[is_caption] <- gsub(pat_caption, "\\1\\2: ", md_raw[is_caption], perl = TRUE)
+
+writeLines(md_raw, "render2rticle_V1.md", useBytes = TRUE)
+```
+
+```{r}
+#| results: 'asis'
+
+"render2rticle_V1.md" %>% 
+  rticle(type = "list") %>% # ["asis" or "list"]
+  knitr::knit_child(quiet = TRUE) %>% 
+  cat(sep = '\n')
+```
+
+```{r}
+knitr::knit_exit()
+```
+
+# GitHub: check files
+
+```{bash}
+
+SIZE_MB=100
+EXCLUDE_DIRS=(".git" "xclude")
+
+find . \
+  \( -name "${EXCLUDE_DIRS[0]}" -o -name "${EXCLUDE_DIRS[1]}" \) \
+  -prune -o \
+  -type f -size +${SIZE_MB}M -exec ls -lh {} \; | sort -hr -k5
+  
+git reset --soft HEAD~0
+git status
+```
+
+# GitHub: update repository
+
+```{bash}
+
+git pull
+
+git add .
+git commit -m "update"
+git push
+```
+
+# PDF to images (.jpg)
+
+```{r}
+#| eval: false
+
+library(tidyverse)
+library(magick)
+
+pdf4pub <- list.files(".", full.names = T, recursive = T
+                      , pattern = "img.+.pdf") 
+
+path <- dirname(pdf4pub)
+
+imgs <- 1:length(pdf4pub) %>% map(\(x) {
+  
+  filename <- pdf4pub[x] %>% 
+    basename() %>% 
+    gsub(".pdf", "\\1.jpg", .) 
+  
+  pdf4pub[x] %>% 
+    image_read_pdf() %>% 
+    # image_transparent("red") %>% 
+    image_write(format = "jpg", file.path(path, filename))
+  
+})
+```
+
+# Images to PDF
+
+```{r}
+#| eval: false
+
+library(tidyverse)
+library(magick)
+library(qpdf)
+
+img2pdf <- list.files(".", full.names = T
+                      , recursive = T
+                      , pattern = "images") %>% 
+  image_read() %>% 
+  image_write(format = "pdf"
+              , file.path(getwd(), "figures.pdf"))
+```
+
+# Images to grid
+
+```{r}
+#| eval: false
+
+library(tidyverse)
+library(magick)
+library(cowplot)
+
+pdf4pub <- list.files(".", full.names = T, recursive = T
+                      , pattern = "FigureX") %>% 
+  image_read(., density = 600)
+  
+grid <- list(
+  pdf4pub[1] %>% image_crop(image = ., "0x0+0+1500")
+  , pdf4pub[2]
+  ) %>%  
+  map( ~ image_ggplot(.)) %>% 
+  plot_grid(plotlist = ., labels = "auto", ncol = 2)
+
+plot <- grid %>% 
+  ggsave(plot = ., "manuscript/Figure-X.jpg"
+         , units = "cm"
+         , width = 20
+         , height = 10
+         )
+```
+
+# Zip files
+
+```{r}
+#| eval: false
+
+tozip <- "manuscript" 
+
+# unlink(paste0(tozip, ".zip"), recursive = T)
+
+utils::zip(zipfile = paste0(tozip, ".zip")
+                             , files = tozip
+                             , flags = "-r9Xj"
+                             )
+```
+

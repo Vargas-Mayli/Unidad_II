@@ -1,0 +1,31 @@
+---
+title: "Quinoa salinity"
+author: "Yoel Diaz"
+format:
+  html:
+    toc: true
+    toc-expand: true
+    toc-depth: 4
+    toc-location: left
+    number-sections: true
+    self-contained: true
+    code-fold: false
+editor_options:
+  chunk_output_type: console
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+# Project Setup
+---
+
+```{r}
+#| label: setup
+
+source('https://inkaverse.com/setup.r')
+```
+
+```{# Data import}
+```

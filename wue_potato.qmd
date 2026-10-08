@@ -1,0 +1,211 @@
+---
+title: "WUE potato"
+author: "Yoel Diaz"
+editor: visual
+---
+
+```{r}
+source('https://inkaverse.com/setup.r')
+```
+
+#Data import
+
+```{r}
+gs <- "https://docs.google.com/spreadsheets/d/15r7ZwcZZHbEgltlF6gSFvCTFA-CFzVBWwg3mFlRyKPs/edit?gid=172957346#gid=172957346" %>% 
+  as_sheets_id()
+
+fb <- gs %>% 
+  range_read(ss = ., sheet = "fb")
+
+str(fb)
+```
+
+`# Data preparation`
+
+```{r}
+fb <- fb %>% 
+  mutate(
+    irrigation = factor(irrigation),
+    genotype = factor(genotype),
+    block = factor(block),
+    replication = factor(replication)
+  )
+
+str(fb)
+```
+
+`# Boxplot`
+
+```{r}
+ggplot(fb, aes(x = irrigation, y = wue)) +
+  geom_boxplot() +
+  labs(
+    x = "Irrigation",
+    y = "WUE"
+  ) +
+  theme_classic()
+```
+
+```         
+# Analisis factorial
+## Box plot
+```
+
+```{r}
+ggplot(fb, aes(x = genotype, y = hi, fill = irrigation)) +
+  geom_boxplot() +
+  theme_classic()
+```
+
+#Modelo estadistico
+
+$$y = \mu + block + genotype + irrigation + genotype*irrigation + error$$
+
+##Anova
+
+```{r}
+av <- aov(tubdw ~ block + genotype * irrigation, data = fb)
+
+anova(av)
+```
+
+```         
+# Diagnóstico
+```
+
+```{r}
+plot(av)
+```
+
+```{r}
+mc <- emmeans(av, ~ genotype | irrigation) %>%
+  cld(Letters = letters, adjust = "sidak")
+
+mc
+```
+
+```{r}
+mc_i <- av %>% 
+  emmeans(~ irrigation | genotype) %>% 
+  cld(Letters = letters, reversed = TRUE) %>% 
+  mutate(across(".group", trimws)) %>% 
+  mutate(across(".group", tolower)) %>% 
+  rename(sig_i = ".group")
+
+mc_o <- av %>% 
+  emmeans(~ genotype | irrigation) %>% 
+  cld(Letters = letters, reversed = TRUE) %>% 
+  mutate(across(".group", trimws)) %>% 
+  mutate(across(".group", toupper)) %>% 
+  rename(sig_o = ".group")
+
+mc <- merge(mc_i, mc_o) %>% 
+  unite(col = "sig", c("sig_i", "sig_o"), sep = "")
+
+mc
+```
+
+##Gráfico
+
+```{r}
+mc %>%
+  plot_smr(
+    type = "line",
+    x = "genotype",
+    y = "emmean",
+    group = "irrigation",
+    sig = "sig",
+    sigsize = 2,
+    error = "SE"
+  )
+```
+
+`## Multivariate`
+
+```{r}
+library(factoextra)
+
+dtx <- fb %>% 
+  dplyr::select(!c("block", "replication")) %>% 
+  group_by(irrigation, genotype) %>% 
+  summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% 
+  unite("rowname", c("irrigation", "genotype"), remove = F, sep = "-") %>% 
+  column_to_rownames() %>% 
+  as.data.frame()
+
+str(dtx)
+```
+
+```{r}
+mv <- dtx %>% 
+  PCA(scale.unit = T,
+      graph = F,
+      quali.sup = c(1, 2))
+var <- mv %>% 
+  plot.PCA(choix = c("var"), cex = 0.7)
+var
+
+cos <- mv %>% 
+  fviz_pca_var(col.var = "cos2",
+               gradient.cols = inti:::paleta(),
+               repel = TRUE,
+               labelsize = 2)
+
+cos
+
+ind <- mv %>% 
+  plot.PCA(choix = c("ind"),
+           cex = 0.7,
+           label = "ind",
+           invisible = "quali",
+           col.hab = inti:::paleta(),
+           habillage = "none"
+  )
+
+ind
+
+pcainfo <- factoextra::get_pca(mv); pcainfo
+
+pcainfo$cor %>% 
+  kable(caption = "Variable correlations")
+
+pcainfo$contrib %>% 
+  kable(caption = "Variable Contribution")
+
+pcainfo$cos2 %>% 
+  kable(caption = "Variable Cos2")
+
+cls <- mv %>% 
+  HCPC(nb.clust = -1, graph = FALSE)
+
+map <- \() {plot.HCPC(cls, choice = "map", draw.tree = FALSE)}
+
+
+cls$call$t$tree
+
+cls$data.clust %>% 
+  kable(caption = "Cluster membership of each individual")
+
+cls$desc.var$quanti %>% 
+  kable(caption = "Quantitative variables cha3racterizing each cluster")
+
+cls$desc.var$category %>% 
+  kable(caption = "Categorical variables significantly by cluster")
+
+table(cls$data.clust$clust) %>% 
+  kable(caption = "Number of individuals assigned to each cluster")
+
+cls$desc.var$category %>% 
+  kable(caption = "Categorical variables significantly by cluster")
+
+table(cls$data.clust$clust) %>% 
+  kable(caption = "Number of individuals assigned to each cluster")
+
+plot <- list(var, cos, ind, map) %>% 
+  plot_grid(plotlist = ., ncol = 2, labels = "auto") %>% 
+  ggsave(plot = ., "manuscript/multivariate.jpg", units = "cm"
+         , width = 30, height = 30)
+
+plot %>% include_graphics()
+
+```
