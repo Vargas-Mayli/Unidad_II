@@ -1,0 +1,1397 @@
+---
+title: "Reorganización y análisis de datos"
+format:
+  html:
+    toc: true
+    toc-expand: true
+    toc-depth: 4
+    toc-location: left
+    number-sections: false
+    self-contained: true
+    code-fold: false
+editor_options: 
+  chunk_output_type: console
+execute: 
+  warning: false
+  message: false
+  echo: true
+---
+
+# Cargar librerías
+
+```{r}
+
+source("https://inkaverse.com/setup.r")
+
+library(tidyverse)
+library(googlesheets4)
+library(emmeans)
+library(multcomp)
+library(multcompView)
+
+library(FactoMineR)
+library(factoextra)
+library(patchwork)
+library(ggrepel)
+
+```
+
+# Importar datos y estructura
+
+```{r}
+#| include: false
+
+gs <- "https://docs.google.com/spreadsheets/d/1bEwz2UM9MGXKwOIfFgEAKHt0jfx-M0-GIYKu9ujxCjI/edit?usp=sharing" %>% 
+  as_sheets_id()
+
+# Estructurar base de datos
+fb <- gs %>%
+  range_read(sheet = "fb") %>%
+  mutate(
+    topofisis = factor(
+      topofisis,
+      levels = c(
+        "Estaca basal",
+        "Estaca parte media",
+        "Estaca parte apical"
+      )
+    ),
+    dosis_root_hor = factor(
+      dosis_root_hor,
+      levels = c("0 ppm", "5000 ppm", "10000 ppm")
+    ),
+    ntreat = factor(ntreat, levels = 1:9),
+    rep = factor(rep)
+  )
+
+str(fb)
+
+# Verificar variables numéricas
+fb %>%
+  dplyr::select(
+    matches("^(n_brotes|l_brote|n_raices|l_raiz)_")
+  ) %>%
+  summarise(
+    across(
+      everything(),
+      is.numeric
+    )
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = "variable",
+    values_to = "numerica"
+  ) %>%
+  filter(!numerica)
+
+# Conservar una copia intacta de la base original
+# Representa la información transcrita del libro de campo
+fb_raw <- fb
+
+```
+
+# Variable: Número de estacas vivas
+
+## 1. Preparación de datos
+
+```{r}
+
+supervivencia <- fb %>%
+  rowwise() %>%
+  mutate(
+    vivas_15 = sum(c_across(matches("^estado_15_[0-9]+$")) == "V"),
+    vivas_30 = sum(c_across(matches("^estado_30_[0-9]+$")) == "V"),
+    vivas_45 = sum(c_across(matches("^estado_45_[0-9]+$")) == "V"),
+    vivas_60 = sum(c_across(matches("^estado_60_[0-9]+$")) == "V")
+  ) %>%
+  ungroup() %>%
+  dplyr::select(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep,
+    vivas_15:vivas_60
+  )
+
+
+
+```
+
+## 2. Evolución temporal
+
+```{r}
+
+supervivencia_long <- supervivencia %>%
+  pivot_longer(
+    cols = starts_with("vivas_"),
+    names_to = "dia",
+    values_to = "estacas_vivas"
+  ) %>%
+  mutate(
+    dia = parse_number(dia)
+  )
+
+supervivencia_media <- supervivencia_long %>%
+  group_by(ntreat, topofisis, dosis_root_hor, dia) %>%
+  summarise(
+    media = mean(estacas_vivas),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    tratamiento = factor(
+      ntreat,
+      levels = 1:9,
+      labels = c(
+        "T1 = Basal + 10000 ppm",
+        "T2 = Media + 10000 ppm",
+        "T3 = Apical + 10000 ppm",
+        "T4 = Basal + 5000 ppm",
+        "T5 = Media + 5000 ppm",
+        "T6 = Apical + 5000 ppm",
+        "T7 = Basal + 0 ppm",
+        "T8 = Media + 0 ppm",
+        "T9 = Apical + 0 ppm"
+      )
+    )
+  )
+
+```
+
+```{r}
+
+graf_supervivencia_tiempo <- ggplot(
+  supervivencia_media,
+  aes(
+    x = dia,
+    y = media,
+    color = tratamiento,
+    shape = tratamiento,
+    group = tratamiento
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  scale_shape_manual(
+    values = c(16, 17, 15, 3, 7, 8, 1, 2, 4)
+  ) +
+  scale_x_continuous(
+    breaks = c(15, 30, 45, 60)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 10),
+    breaks = seq(0, 10, 2)
+  ) +
+  labs(
+    x = "Días",
+    y = "Estacas vivas",
+    color = "Tratamientos",
+    shape = "Tratamientos"
+  ) +
+  theme_classic()
+
+graf_supervivencia_tiempo
+
+ggsave(
+  "manuscript/figuras/supervivencia_tiempo.png",
+  plot = graf_supervivencia_tiempo,
+  width = 10,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+## 3. ANOVA
+
+```{r}
+
+modelo_vivas <- aov(
+  vivas_60 ~ topofisis * dosis_root_hor,
+  data = supervivencia
+)
+
+summary(modelo_vivas)
+
+# Gráficos diagnósticos del ANOVA
+
+par(mfrow = c(2, 2))
+
+plot(modelo_vivas)
+
+par(mfrow = c(1, 1))
+
+```
+
+## 4. Comparación de medias
+
+```{r}
+
+emm_topofisis <- emmeans(
+  modelo_vivas,
+  ~ topofisis
+)
+
+pairs(
+  emm_topofisis,
+  adjust = "tukey"
+)
+
+letras_topofisis <- multcomp::cld(
+  emm_topofisis,
+  Letters = letters,
+  reversed = TRUE
+) %>%
+  as.data.frame() %>%
+  mutate(
+    letra = str_trim(.group)
+  )
+
+letras_topofisis
+
+```
+
+## 5. Medias ajustadas
+
+```{r}
+
+emm_vivas <- emmeans(
+  modelo_vivas,
+  ~ topofisis * dosis_root_hor
+) %>%
+  as.data.frame()
+
+emm_vivas
+
+```
+
+## 6. Gráfico de medias ajustadas
+
+```{r}
+
+pos_letras <- emm_vivas %>%
+  group_by(topofisis) %>%
+  summarise(
+    y = max(upper.CL) + 0.3,
+    .groups = "drop"
+  ) %>%
+  left_join(
+    letras_topofisis %>%
+      dplyr::select(topofisis, letra),
+    by = "topofisis"
+  )
+
+graf_supervivencia_60 <- ggplot(
+  emm_vivas,
+  aes(
+    x = topofisis,
+    y = emmean,
+    color = dosis_root_hor,
+    group = dosis_root_hor
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(
+      ymin = lower.CL,
+      ymax = upper.CL
+    ),
+    width = 0.08
+  ) +
+  geom_text(
+    data = pos_letras,
+    aes(
+      x = topofisis,
+      y = y,
+      label = letra
+    ),
+    inherit.aes = FALSE,
+    size = 5,
+    fontface = "bold"
+  ) +
+  scale_x_discrete(
+    labels = c(
+      "Estaca basal" = "Basal",
+      "Estaca parte media" = "Media",
+      "Estaca parte apical" = "Apical"
+    )
+  ) +
+  labs(
+    x = "Topófisis",
+    y = "Estacas vivas",
+    color = "Dosis de Root Hor"
+  ) +
+  theme_classic()
+
+graf_supervivencia_60
+
+# Guardar figura
+
+ggsave(
+  "manuscript/figuras/supervivencia_60_dias.png",
+  plot = graf_supervivencia_60,
+  width = 9,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+# Variable: Número de brotes por estaca
+
+## 1. Preparación de datos
+
+```{r}
+
+# Pasar estado y número de brotes a formato largo
+# Se mantiene la identificación de cada estaca dentro de cada unidad experimental
+
+brotes_crudo <- fb_raw %>%
+  dplyr::select(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep,
+    matches("^(estado|n_brotes)_")
+  ) %>%
+  pivot_longer(
+    cols = matches("^(estado|n_brotes)_"),
+    names_to = c(".value", "dia", "estaca"),
+    names_pattern = "^(estado|n_brotes)_([0-9]+)_([0-9]+)$"
+  ) %>%
+  mutate(
+    dia = as.numeric(dia),
+    estaca = as.numeric(estaca)
+  )
+
+# Verificar inconsistencias del libro de campo
+# Se identifican estacas registradas como muertas que todavía presentan brotes
+# Estos registros se conservan en fb_raw y no se eliminan de la base original
+
+inconsistencias_brotes <- brotes_crudo %>%
+  filter(
+    estado == "M",
+    n_brotes > 0
+  )
+
+inconsistencias_brotes
+
+
+# Calcular número de brotes por estaca
+# Para el análisis se consideran las estacas vivas que presentan brotes
+# Los registros con estado "M" y número de brotes mayor que cero
+# se mantienen en la base original, pero no se incluyen en este cálculo
+
+brotes_long <- brotes_crudo %>%
+  group_by(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep,
+    dia
+  ) %>%
+  summarise(
+    n_brotes = {
+      
+      x <- n_brotes[
+        !is.na(estado) &
+        estado == "V" &
+        !is.na(n_brotes) &
+        n_brotes > 0
+      ]
+      
+      if (length(x) == 0) {
+        0
+      } else {
+        mean(x)
+      }
+    },
+    .groups = "drop"
+  )
+
+# Base resumida por unidad experimental y fecha
+
+brotes <- brotes_long %>%
+  pivot_wider(
+    names_from = dia,
+    values_from = n_brotes,
+    names_prefix = "brotes_"
+  )
+
+brotes
+
+```
+
+## 2. Evolución temporal
+
+```{r}
+
+brotes_media <- brotes_long %>%
+  group_by(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    dia
+  ) %>%
+  summarise(
+    media = mean(n_brotes),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    tratamiento = factor(
+      ntreat,
+      levels = 1:9,
+      labels = c(
+        "T1 = Basal + 10000 ppm",
+        "T2 = Media + 10000 ppm",
+        "T3 = Apical + 10000 ppm",
+        "T4 = Basal + 5000 ppm",
+        "T5 = Media + 5000 ppm",
+        "T6 = Apical + 5000 ppm",
+        "T7 = Basal + 0 ppm",
+        "T8 = Media + 0 ppm",
+        "T9 = Apical + 0 ppm"
+      )
+    )
+  )
+
+```
+
+```{r}
+
+graf_brotes_tiempo <- ggplot(
+  brotes_media,
+  aes(
+    x = dia,
+    y = media,
+    color = tratamiento,
+    shape = tratamiento,
+    group = tratamiento
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  scale_shape_manual(
+    values = c(16, 17, 15, 3, 7, 8, 1, 2, 4)
+  ) +
+  scale_x_continuous(
+    breaks = c(15, 30, 45, 60)
+  ) +
+  labs(
+    x = "Días",
+    y = "Número de brotes por estaca",
+    color = "Tratamientos",
+    shape = "Tratamientos"
+  ) +
+  theme_classic()
+
+graf_brotes_tiempo
+
+ggsave(
+  "manuscript/figuras/brotes_tiempo.png",
+  plot = graf_brotes_tiempo,
+  width = 10,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+## 3. ANOVA
+
+```{r}
+
+# ANOVA factorial a los 60 días
+
+modelo_brotes <- aov(
+  brotes_60 ~ topofisis * dosis_root_hor,
+  data = brotes
+)
+
+summary(modelo_brotes)
+
+plot(modelo_brotes)
+```
+
+## 4. Comparación de medias
+
+```{r}
+
+emm_topofisis_brotes <- emmeans(
+  modelo_brotes,
+  ~ topofisis
+)
+
+pairs(
+  emm_topofisis_brotes,
+  adjust = "tukey"
+)
+
+letras_topofisis_brotes <- multcomp::cld(
+  emm_topofisis_brotes,
+  Letters = letters,
+  reversed = TRUE
+) %>%
+  as.data.frame() %>%
+  mutate(
+    letra = str_trim(.group)
+  )
+
+letras_topofisis_brotes
+
+```
+
+## 5. Medias ajustadas
+
+```{r}
+
+emm_brotes <- emmeans(
+  modelo_brotes,
+  ~ topofisis * dosis_root_hor
+) %>%
+  as.data.frame()
+
+emm_brotes
+
+```
+
+## 6. Gráfico de medias ajustadas
+
+```{r}
+
+pos_letras_brotes <- emm_brotes %>%
+  group_by(topofisis) %>%
+  summarise(
+    y = max(upper.CL) + 0.15,
+    .groups = "drop"
+  ) %>%
+  left_join(
+    letras_topofisis_brotes %>%
+      dplyr::select(topofisis, letra),
+    by = "topofisis"
+  )
+
+graf_brotes_60 <- ggplot(
+  emm_brotes,
+  aes(
+    x = topofisis,
+    y = emmean,
+    color = dosis_root_hor,
+    group = dosis_root_hor
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(
+      ymin = lower.CL,
+      ymax = upper.CL
+    ),
+    width = 0.08
+  ) +
+  geom_text(
+    data = pos_letras_brotes,
+    aes(
+      x = topofisis,
+      y = y,
+      label = letra
+    ),
+    inherit.aes = FALSE,
+    size = 5,
+    fontface = "bold"
+  ) +
+  scale_x_discrete(
+    labels = c(
+      "Estaca basal" = "Basal",
+      "Estaca parte media" = "Media",
+      "Estaca parte apical" = "Apical"
+    )
+  ) +
+  labs(
+    x = "Topófisis",
+    y = "Número de brotes por estaca",
+    color = "Dosis de Root Hor"
+  ) +
+  theme_classic()
+
+graf_brotes_60
+
+ggsave(
+  "manuscript/figuras/brotes_60_dias.png",
+  plot = graf_brotes_60,
+  width = 9,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+# Variable: Largo de brotes por estaca.
+
+## 1. Preparación de datos
+
+```{r}
+
+# Pasar estado, número de brotes y largo de brotes a formato largo
+# Se mantiene la identificación de cada estaca dentro de cada unidad experimental
+
+largo_crudo <- fb_raw %>%
+  dplyr::select(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep,
+    matches("^(estado|n_brotes|l_brote)_")
+  ) %>%
+  pivot_longer(
+    cols = matches("^(estado|n_brotes|l_brote)_"),
+    names_to = c(".value", "dia", "estaca"),
+    names_pattern = "^(estado|n_brotes|l_brote)_([0-9]+)_([0-9]+)$"
+  ) %>%
+  mutate(
+    dia = as.numeric(dia),
+    estaca = as.numeric(estaca)
+  )
+
+
+# Verificar inconsistencias del libro de campo
+# Se identifican estacas muertas que todavía tienen brotes o largo registrado
+# Estos registros permanecen en fb_raw y no se modifican
+
+inconsistencias_largo <- largo_crudo %>%
+  filter(
+    estado == "M" &
+      (n_brotes > 0 | l_brote > 0)
+  )
+
+inconsistencias_largo
+
+# Verificar brotes registrados con largo igual a cero
+# Se conservan como fueron registrados en el libro de campo
+
+brotes_largo_cero <- largo_crudo %>%
+  filter(
+    estado == "V",
+    n_brotes > 0,
+    l_brote == 0
+  )
+
+brotes_largo_cero
+
+# Verificar largos positivos sin número de brotes registrado
+
+largo_sin_brotes <- largo_crudo %>%
+  filter(
+    estado == "V",
+    n_brotes == 0,
+    l_brote > 0
+  )
+
+largo_sin_brotes
+
+```
+
+```{r}
+
+# Calcular el largo promedio de brotes por estaca
+# Se consideran únicamente estacas vivas que presentan brotes
+# Los registros de estacas muertas se mantienen en la base original,
+# pero no se incluyen en el cálculo de esta variable
+
+largo_brotes_long <- largo_crudo %>%
+  group_by(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep,
+    dia
+  ) %>%
+  summarise(
+    largo_brote = {
+      
+      x <- l_brote[
+        !is.na(estado) &
+        estado == "V" &
+        !is.na(n_brotes) &
+        n_brotes > 0 &
+        !is.na(l_brote)
+      ]
+      
+      if (length(x) == 0) {
+        0
+      } else {
+        mean(x)
+      }
+    },
+    .groups = "drop"
+  )
+
+# Base resumida por unidad experimental y fecha
+
+largo_brotes <- largo_brotes_long %>%
+  pivot_wider(
+    names_from = dia,
+    values_from = largo_brote,
+    names_prefix = "largo_"
+  )
+
+largo_brotes
+
+```
+
+## 2. Evolución temporal
+
+```{r}
+
+largo_brotes_media <- largo_brotes_long %>%
+  group_by(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    dia
+  ) %>%
+  summarise(
+    media = mean(largo_brote),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    tratamiento = factor(
+      ntreat,
+      levels = 1:9,
+      labels = c(
+        "T1 = Basal + 10000 ppm",
+        "T2 = Media + 10000 ppm",
+        "T3 = Apical + 10000 ppm",
+        "T4 = Basal + 5000 ppm",
+        "T5 = Media + 5000 ppm",
+        "T6 = Apical + 5000 ppm",
+        "T7 = Basal + 0 ppm",
+        "T8 = Media + 0 ppm",
+        "T9 = Apical + 0 ppm"
+      )
+    )
+  )
+
+```
+
+```{r}
+
+graf_largo_tiempo <- ggplot(
+  largo_brotes_media,
+  aes(
+    x = dia,
+    y = media,
+    color = tratamiento,
+    shape = tratamiento,
+    group = tratamiento
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  scale_shape_manual(
+    values = c(16, 17, 15, 3, 7, 8, 1, 2, 4)
+  ) +
+  scale_x_continuous(
+    breaks = c(15, 30, 45, 60)
+  ) +
+  labs(
+    x = "Días",
+    y = "Largo de brotes por estaca (cm)",
+    color = "Tratamientos",
+    shape = "Tratamientos"
+  ) +
+  theme_classic()
+
+graf_largo_tiempo
+
+ggsave(
+  "manuscript/figuras/largo_brotes_tiempo.png",
+  plot = graf_largo_tiempo,
+  width = 10,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+## 3. ANOVA
+
+```{r}
+
+# ANOVA factorial a los 60 días
+
+modelo_largo <- aov(
+  largo_60 ~ topofisis * dosis_root_hor,
+  data = largo_brotes
+)
+
+summary(modelo_largo)
+
+plot(modelo_largo)
+```
+
+## 4. Comparación de medias
+
+```{r}
+
+emm_topofisis_largo <- emmeans(
+  modelo_largo,
+  ~ topofisis
+)
+
+pairs(
+  emm_topofisis_largo,
+  adjust = "tukey"
+)
+
+letras_topofisis_largo <- multcomp::cld(
+  emm_topofisis_largo,
+  Letters = letters,
+  reversed = TRUE
+) %>%
+  as.data.frame() %>%
+  mutate(
+    letra = str_trim(.group)
+  )
+
+letras_topofisis_largo
+
+```
+
+## 5. Medias ajustadas
+
+```{r}
+
+emm_largo <- emmeans(
+  modelo_largo,
+  ~ topofisis * dosis_root_hor
+) %>%
+  as.data.frame()
+
+emm_largo
+
+```
+
+## 6. Gráfico de medias ajustadas
+
+```{r}
+
+pos_letras_largo <- emm_largo %>%
+  group_by(topofisis) %>%
+  summarise(
+    y = max(upper.CL) + 0.3,
+    .groups = "drop"
+  ) %>%
+  left_join(
+    letras_topofisis_largo %>%
+      dplyr::select(topofisis, letra),
+    by = "topofisis"
+  )
+
+graf_largo_60 <- ggplot(
+  emm_largo,
+  aes(
+    x = topofisis,
+    y = emmean,
+    color = dosis_root_hor,
+    group = dosis_root_hor
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(
+      ymin = lower.CL,
+      ymax = upper.CL
+    ),
+    width = 0.08
+  ) +
+  geom_text(
+    data = pos_letras_largo,
+    aes(
+      x = topofisis,
+      y = y,
+      label = letra
+    ),
+    inherit.aes = FALSE,
+    size = 5,
+    fontface = "bold"
+  ) +
+  scale_x_discrete(
+    labels = c(
+      "Estaca basal" = "Basal",
+      "Estaca parte media" = "Media",
+      "Estaca parte apical" = "Apical"
+    )
+  ) +
+  labs(
+    x = "Topófisis",
+    y = "Largo de brotes por estaca (cm)",
+    color = "Dosis de Root Hor"
+  ) +
+  theme_classic()
+
+graf_largo_60
+
+ggsave(
+  "manuscript/figuras/largo_brotes_60_dias.png",
+  plot = graf_largo_60,
+  width = 9,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+# Análisis complementario - multivariado: PCA
+
+## 1. Preparación de la base
+
+```{r}
+
+# Patrón de las variables evaluadas a los 60 días
+
+patron_pca <- "^(estado|n_brotes|l_brote|raiz_callo)_60_([0-9]+)$"
+
+# Reorganizar los datos a nivel de estaca
+# raiz_callo se convierte a texto porque contiene 0, R y C
+
+pca_crudo <- fb_raw %>%
+  mutate(
+    across(
+      matches("^raiz_callo_60_[0-9]+$"),
+      as.character
+    )
+  ) %>%
+  dplyr::select(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep,
+    matches(patron_pca)
+  ) %>%
+  pivot_longer(
+    cols = matches(patron_pca),
+    names_to = c(".value", "estaca"),
+    names_pattern = patron_pca
+  ) %>%
+  mutate(
+    estaca = as.numeric(estaca)
+  )
+
+pca_crudo
+
+```
+
+```{r}
+
+# Promedio de una variable en estacas vivas con brotación
+
+media_brotacion <- function(x, estado, n_brotes) {
+  
+  validas <- !is.na(estado) &
+    estado == "V" &
+    !is.na(n_brotes) &
+    n_brotes > 0 &
+    !is.na(x)
+  
+  if (any(validas)) {
+    mean(x[validas])
+  } else {
+    0
+  }
+}
+
+
+# Construir indicadores por unidad experimental
+
+pca_base <- pca_crudo %>%
+  group_by(
+    ntreat,
+    topofisis,
+    dosis_root_hor,
+    rep
+  ) %>%
+  summarise(
+    
+    vivas_60 = sum(
+      estado == "V",
+      na.rm = TRUE
+    ),
+    
+    estacas_brotes_60 = sum(
+      estado == "V" &
+        !is.na(n_brotes) &
+        n_brotes > 0,
+      na.rm = TRUE
+    ),
+    
+    brotes_60 = media_brotacion(
+      n_brotes,
+      estado,
+      n_brotes
+    ),
+    
+    largo_60 = media_brotacion(
+      l_brote,
+      estado,
+      n_brotes
+    ),
+    
+    callos_60 = sum(
+      raiz_callo == "C",
+      na.rm = TRUE
+    ),
+    
+    raices_60 = sum(
+      raiz_callo == "R",
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    tratamiento = factor(
+      paste0("T", as.character(ntreat)),
+      levels = paste0("T", 1:9)
+    ),
+    unidad = paste0(
+      tratamiento,
+      "R",
+      rep
+    )
+  )
+
+pca_base
+
+```
+
+## 2. Revisión de variables
+
+```{r}
+
+# Estadísticos descriptivos de las variables evaluadas
+
+resumen_pca <- pca_base %>%
+  summarise(
+    across(
+      c(
+        vivas_60,
+        estacas_brotes_60,
+        brotes_60,
+        largo_60,
+        callos_60,
+        raices_60
+      ),
+      list(
+        media = mean,
+        sd = sd,
+        min = min,
+        max = max
+      )
+    )
+  )
+
+resumen_pca
+
+# Revisar frecuencia de raíces y callos
+
+frecuencia_raiz_callo <- pca_base %>%
+  summarise(
+    total_callos = sum(callos_60),
+    ue_con_callo = sum(callos_60 > 0),
+    total_raices = sum(raices_60),
+    ue_con_raiz = sum(raices_60 > 0)
+  )
+
+frecuencia_raiz_callo
+
+```
+
+## 3. Matriz para el PCA
+
+```{r}
+
+# Variables activas del PCA
+# Se seleccionan solo variables cuantitativas con variación suficiente.
+# estacas_brotes_60 se excluye por su alta asociación con supervivencia,
+# mientras que callos_60 y raices_60 no se incluyen por su escasa variabilidad.
+# Matriz de variables cuantitativas activas
+
+pca_datos <- pca_base %>%
+  transmute(
+    Supervivencia = vivas_60,
+    `N° brotes/estaca` = brotes_60,
+    `Largo de brotes` = largo_60
+  )
+
+pca_datos
+
+# Verificar variabilidad
+
+sapply(
+  pca_datos,
+  sd
+)
+
+# Matriz de correlaciones
+
+round(
+  cor(pca_datos),
+  2
+)
+
+```
+
+## 4. Ejecutar el PCA
+
+```{r}
+
+# Análisis de componentes principales
+# Las variables se estandarizan para darles el mismo peso
+
+modelo_pca <- FactoMineR::PCA(
+  pca_datos,
+  scale.unit = TRUE,
+  graph = FALSE
+)
+
+modelo_pca
+
+```
+
+## 5. Varianza explicada
+
+```{r}
+
+# Varianza explicada por los componentes principales
+
+varianza_pca <- factoextra::get_eigenvalue(
+  modelo_pca
+) %>%
+  as.data.frame() %>%
+  rownames_to_column(
+    "dimension"
+  )
+
+varianza_pca
+
+
+# Etiquetas de las dimensiones
+
+eje_dim1 <- paste0(
+  "Dim 1 (",
+  round(
+    varianza_pca$variance.percent[1],
+    1
+  ),
+  "%)"
+)
+
+eje_dim2 <- paste0(
+  "Dim 2 (",
+  round(
+    varianza_pca$variance.percent[2],
+    1
+  ),
+  "%)"
+)
+
+```
+
+## 6. PCA de variables e individuos
+
+### 6.1. Variables
+
+```{r}
+
+# Coordenadas de las variables
+
+pca_variables <- factoextra::get_pca_var(
+  modelo_pca
+)$coord %>%
+  as.data.frame() %>%
+  rownames_to_column("variable")
+
+pca_variables
+
+```
+
+### 6.2. Individuos y centroides de tratamientos
+
+```{r}
+
+# Coordenadas de las 27 unidades experimentales
+
+pca_individuos <- factoextra::get_pca_ind(
+  modelo_pca
+)$coord %>%
+  as.data.frame() %>%
+  rownames_to_column(
+    "fila"
+  ) %>%
+  bind_cols(
+    pca_base %>%
+      dplyr::select(
+        tratamiento,
+        rep,
+        topofisis,
+        dosis_root_hor
+      )
+  )
+
+pca_individuos
+
+# Centroides de los tratamientos T1-T9
+
+pca_tratamientos <- pca_individuos %>%
+  group_by(
+    tratamiento,
+    topofisis,
+    dosis_root_hor
+  ) %>%
+  summarise(
+    Dim1 = mean(Dim.1),
+    Dim2 = mean(Dim.2),
+    .groups = "drop"
+  )
+
+pca_tratamientos
+
+```
+
+## 7. Figura del PCA
+
+```{r}
+
+graf_pca_variables <- factoextra::fviz_pca_var(
+  modelo_pca,
+  repel = TRUE,
+  col.var = "black"
+) +
+  labs(
+    title = "PCA de variables",
+    x = eje_dim1,
+    y = eje_dim2
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    )
+  )
+
+graf_pca_variables
+
+graf_pca_individuos <- ggplot() +
+  
+  # Unidades experimentales del PCA
+  geom_point(
+    data = pca_individuos,
+    aes(
+      x = Dim.1,
+      y = Dim.2,
+      color = topofisis,
+      shape = dosis_root_hor
+    ),
+    size = 2.2,
+    alpha = 0.30
+  ) +
+  
+  # Centroides de los tratamientos T1-T9
+  geom_point(
+    data = pca_tratamientos,
+    aes(
+      x = Dim1,
+      y = Dim2,
+      color = topofisis,
+      shape = dosis_root_hor
+    ),
+    size = 4
+  ) +
+  
+  # Identificación de los centroides
+  ggrepel::geom_text_repel(
+    data = pca_tratamientos,
+    aes(
+      x = Dim1,
+      y = Dim2,
+      label = tratamiento,
+      color = topofisis
+    ),
+    size = 4,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  
+  geom_hline(
+    yintercept = 0,
+    linetype = 2
+  ) +
+  
+  geom_vline(
+    xintercept = 0,
+    linetype = 2
+  ) +
+  
+  labs(
+    title = "PCA de individuos",
+    x = eje_dim1,
+    y = eje_dim2,
+    color = "Topófisis",
+    shape = "Dosis de Root Hor"
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    )
+  )
+
+graf_pca_individuos
+
+fig_pca <- graf_pca_variables + graf_pca_individuos +
+  plot_layout(
+    ncol = 2,
+    widths = c(1, 1.2),
+    guides = "collect"
+  ) +
+  plot_annotation(
+    tag_levels = "a"
+  ) &
+  theme(
+    legend.position = "bottom",
+    plot.tag = element_text(
+      face = "bold",
+      size = 12
+    )
+  )
+
+fig_pca
+
+ggsave(
+  "manuscript/figuras/pca_variables_individuos.png",
+  plot = fig_pca,
+  width = 12,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+# Interpretacion
+
+El análisis de componentes principales permitió integrar las principales variables de respuesta evaluadas a los 60 días (supervivencia, número de brotes por estaca y largo de brotes) con el propósito de identificar los tratamientos asociados con un mejor comportamiento general de las estacas de Handroanthus impetiginosus. Las dos primeras dimensiones explicaron el 93,68 % de la variación total, correspondiendo 80,96 % a la Dimensión 1 y 12,72 % a la Dimensión 2, por lo que el plano factorial representó adecuadamente la respuesta conjunta de las variables.
+
+La Dimensión 1 estuvo asociada positivamente con la supervivencia, el número de brotes por estaca y el largo de brotes, por lo que puede interpretarse como un gradiente de desempeño vegetativo. Los tratamientos ubicados hacia los valores positivos de esta dimensión presentaron, de manera conjunta, mejores respuestas en estas características. En este sentido, T4, correspondiente a estacas basales tratadas con 5000 ppm de Root Hor, y T7, correspondiente a estacas basales sin Root Hor, presentaron los centroides más altos en la Dimensión 1, seguidos por T1, también constituido por estacas basales.
+
+En contraste, los tratamientos formados por estacas de la sección media y, principalmente, de la sección apical se ubicaron hacia el sector negativo de la Dimensión 1. T3, T6, T8 y T9 presentaron prácticamente la misma posición debido a sus respuestas bajas o nulas en las variables consideradas. Esta distribución indica que la procedencia de la estaca dentro del tallo estuvo más asociada con el comportamiento global de la propagación que la concentración de Root Hor, ya que los tratamientos con estacas basales se separaron claramente de los tratamientos con estacas medias y apicales, mientras que no se observó una separación consistente de los tratamientos de acuerdo únicamente con la dosis del enraizador.
+
+Por tanto, desde una perspectiva multivariada, los resultados indican que las estacas basales presentaron el mejor desempeño general a los 60 días, especialmente en los tratamientos T4 y T7. La aplicación de Root Hor no mostró un patrón progresivo de mejora con el aumento de la concentración, debido a que el tratamiento basal sin enraizador presentó una respuesta similar al tratamiento basal con 5000 ppm y superior al tratamiento con 10000 ppm. Estos resultados sugieren que, bajo las condiciones del experimento, la topófisis fue un factor más determinante que la dosis de Root Hor para explicar la respuesta conjunta de supervivencia, brotación y crecimiento de los brotes.
+
+
+
